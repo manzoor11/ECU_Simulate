@@ -24,12 +24,29 @@ class vcan_config():
         self.bus = can.Bus(interface='socketcan',
                            channel='vcan0',
                            receive_own_messages=True)
-        self.buffer = can.BufferedReader()
-        self.notifier = can.Notifier(self.bus, [_get_message, self.buffer])
+        self._defaultConfig()
 
+    def _defaultConfig(self):
+        msgDataStat_active.canData_DashB_Curnt = msgDataStat_active.canData_DashB_Def
+        msgDataStat_active.canData_Emergnc_Curnt = msgDataStat_active.canData_Emergnc_Def
+
+class msgDataStatus ():
+    def __init__(self):
         self.db = cantools.database.load_file('Sample.dbc')
-        self.example_message = self.db.get_message_by_name('ExampleMessage')
-        self.test_message = self.db.get_message_by_name('Message1')
+        self.DashboardMessage = self.db.get_message_by_name('DashboardMessage')
+        self.EmergencyMessage = self.db.get_message_by_name('EmergencyMessage')
+
+        # Normal Situation
+        self.canData_DashB_Def = self.DashboardMessage.encode({'Temperature': 50, 'Speed':15 , 'DoorLock': 1, 'SeatBelt':1})
+        self.canData_Emergnc_Def = self.EmergencyMessage.encode({'CrashStat': 0, 'AirbagStat': 0})
+        # Mock Events
+        self.crashDetect = self.EmergencyMessage.encode({'CrashStat': 1, 'AirbagStat': 0})
+        self.airbagRelease = self.EmergencyMessage.encode({'CrashStat': 1, 'AirbagStat': 1})
+        self.overTemp = self.DashboardMessage.encode({'Temperature': 150, 'Speed':15 , 'DoorLock': 1, 'SeatBelt':1})
+        self.vhclStop = self.DashboardMessage.encode({'Temperature': 150, 'Speed': 0, 'DoorLock': 0, 'SeatBelt': 0})
+
+        self.canData_DashB_Curnt = None
+        self.canData_Emergnc_Curnt = None
 
 class traceCAN():
 
@@ -41,37 +58,52 @@ class traceCAN():
         while not stop_event.is_set():
             rx_msg = self.bus.recv(1)
             if rx_msg is not None:
-                msgDisp = (rx_msg.arbitration_id, vcan_active.db.decode_message(rx_msg.arbitration_id, rx_msg.data))
+                msgDisp = (rx_msg.arbitration_id, msgDataStat_active.db.decode_message(rx_msg.arbitration_id, rx_msg.data))
+                msgDt = (msgDataStat_active.db.decode_message(rx_msg.arbitration_id, rx_msg.data))
+                # try:
+                #     if (((msgDt['CrashStat'] == 'Crash_Detect')) and ((msgDt['AirbagStat'] == 'Fine_Airbag'))):
+                #         canID_Q = msgDataStat_active.EmergencyMessage.frame_id
+                #         canData_Q = msgDataStat_active.EmergencyMessage.encode({'CrashStat': 1, 'AirbagStat': 1})  #(msgDataStat_active.airbagRelease)
+                #         sendMsg()._send(canId=canID_Q, canData=canData_Q)
+                #         #sendMsg()._send(canId=canID_Q, canData=canData_Q)
+                #         logging.info('AirBag Released')
+                # except KeyError:
+                #     pass
+
                 print("rx: {}".format(msgDisp))
         print("Stopped receiving messages")
         #return can.Notifier(self.bus, [can.Printer()])
 
+    def _conditionalSignal(self,msg):
+        msg = 1
+
 class sendMsg(vcan_config):
     def __init__(self):
-        self.bus = vcan_active.bus
+        self.cyclicTask = None
 
     def _send(self, canId, canData):
         # send message
         msg = can.Message(arbitration_id= canId, is_extended_id=False, data= canData)
         try:
             # Send Single Message
-            self.bus.send(msg)
+            vcan_active.bus.send(msg)
         except can.CanError:
             print("Message NOT sent")
 
     def _sendPeriodic(self, canId, canData, period):
-        print("Started Periodic Can Message - Every" + str(period) + "sec")
+        print("Periodic Can Message - Every" + str(period) + "sec")
         msg = can.Message(arbitration_id=canId, is_extended_id=False, data=canData)
         try:
-            can.send_periodic(self.bus, msg, period)
+            self.cyclictask = can.send_periodic(vcan_active.bus, msg, period)
         except can.CanError:
             print("Message NOT sent")
 
-class canTasks (sendMsg,traceCAN):
+class cyclicMsg (sendMsg,traceCAN, msgDataStatus):
     def __init__(self):
         # Send Periodic CAN Messages
-        canID_Q = vcan_active.example_message.frame_id
-        canData_Q = vcan_active.example_message.encode({'Temperature': 250.1, 'AverageRadius': (3.2), 'Enable': 1})
+        canID_Q = msgDataStat_active.DashboardMessage.frame_id
+        canData_Q = msgDataStat_active.canData_DashB_Curnt
+            #msgDataStat_active.DashboardMessage.encode({'Temperature': 50, 'Speed':15 , 'DoorLock': 1, 'SeatBelt':1})
         canPeriod_Q = 1
         sendMsg()._sendPeriodic(canId=canID_Q, canData=canData_Q, period=canPeriod_Q)
 
@@ -97,9 +129,9 @@ class simulatorWindow(QDialog, QPlainTextEdit, QTableWidget, sendMsg, traceCAN):
         logging.getLogger().setLevel(logging.INFO)
 
         self._button1 = QPushButton(self)
-        self._button1.setText('Test Me')
+        self._button1.setText('Crash')
         self._button2 = QPushButton(self)
-        self._button2.setText('Start')
+        self._button2.setText('Over Heat')
 
         layout = QVBoxLayout()
         btnLayout =QHBoxLayout()
@@ -110,36 +142,43 @@ class simulatorWindow(QDialog, QPlainTextEdit, QTableWidget, sendMsg, traceCAN):
         layout.addLayout(btnLayout)
         self.setLayout(layout)
         # Connect signal to slot
-        self._button1.clicked.connect(self._btn1Action)
-        self._button2.clicked.connect(self._updateTrace)
+        self._button1.clicked.connect(self._btnCrash)
+        self._button2.clicked.connect(self._btnEngHeat)
 
     def _btnCrash(self):
         # Send CAN Message
-        canID_Q = vcan_active.test_message.frame_id
-        canData_Q = vcan_active.test_message.encode({'Signal1': 1})
+        canID_Q = msgDataStat_active.EmergencyMessage.frame_id
+        canData_Q = msgDataStat_active.EmergencyMessage.encode({'CrashStat': 1, 'AirbagStat': 0}) #(msgDataStat_active.crashDetect)
+
         sendMsg()._send(canId=canID_Q, canData=canData_Q)
         logging.info('Crash Detected')
 
     def _btnEngHeat(self):
         # Send CAN Message
-        canID_Q = vcan_active.test_message.frame_id
-        canData_Q = vcan_active.example_message.encode({'Temperature': 265.0, 'AverageRadius': (3.2), 'Enable': 1})
-        sendMsg()._send(canId=canID_Q, canData=canData_Q)
+        canPeriod_Q = 1
+        canID_Q = msgDataStat_active.DashboardMessage.frame_id
+        canData_Q = msgDataStat_active.DashboardMessage.encode({'Temperature': 100, 'Speed':15 , 'DoorLock': 1, 'SeatBelt':1})
+
+        msg = can.Message(arbitration_id=canID_Q, is_extended_id=False, data=canData_Q)
+        #cyclicMsg_active.cyclicTask.modify_data(vcan_active.bus, msg, canPeriod_Q)
+        cyclicMsg_active._sendPeriodic(canId=canID_Q, canData=canData_Q, period=canPeriod_Q)
+        #sendMsg()._send(canId=canID_Q, canData=canData_Q)
         logging.info('Engine - Over Temperature Detected')
 
 if (__name__ == '__main__'):
+    msgDataStat_active = msgDataStatus()
     vcan_active = vcan_config()
-    canTask = canTasks()
+    cyclicMsg_active = cyclicMsg()
     trace_active = traceCAN()
+    stop_event = threading.Event()
+    t_receive = threading.Thread(target=trace_active._recieveAll, args=(stop_event,))
+    t_receive.start()
     app = None
     if (not QApplication.instance()):
         app = QApplication([])
     dlg = simulatorWindow()
     dlg.show()
     dlg.raise_()
-    stop_event = threading.Event()
-    t_receive = threading.Thread(target=trace_active._recieveAll, args=(stop_event,))
-    t_receive.start()
     if (app):
         app.exec_()
     stop_event.set()
